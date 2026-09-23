@@ -143,6 +143,10 @@ input,select,textarea{border-radius:8px;border-color:#D3DAE3}
 @media(max-width:760px){.topbar{padding:8px 10px;margin-bottom:12px}.topbar .tt{display:none}.topbar img{height:26px}.chip{font-size:10.5px;padding:3px 8px}aside .brand{display:none}aside button.on::before{display:none}aside button.on{background:#fff;color:var(--ink)}}
 @media print{.topbar,.bkbar{display:none}body{background:#fff}#printArea th{background:#F2F4F7}}
 
+body.ro [onclick*="validar("],body.ro [onclick*="delActa("],body.ro [onclick*="go('registrar'"],body.ro [onclick*="page='registrar'"],body.ro [onclick*="verifyId="],
+body.ro [onclick*="genMuestra"],body.ro [onclick*="resetMuestra"],body.ro [onclick*="corte("],body.ro [onclick*="startSim"],body.ro [onclick*="endSim"],
+body.ro [onclick*="bkChoose"],body.ro [onclick*="bkResume"],body.ro [onclick*="bkWrite"],body.ro [onclick*="exportJSON"],body.ro .bkbar,body.ro aside .bk{display:none!important}
+body.ro input[onchange*="S.onpe"]{pointer-events:none;background:var(--grayb)}
 </style>
 </head>
 <body>
@@ -198,7 +202,9 @@ async function sbLoadState(){
   ]);
   if(le||me||oe||ace||ve) throw new Error((le||me||oe||ace||ve).message);
   DB_ORG_BY_CODE={};DB_ORG_BY_ID={};
-  S.parties=orgs.map((o,i)=>{DB_ORG_BY_CODE[o.codigo]=o;DB_ORG_BY_ID[o.id]=o;return {id:o.codigo,pos:i+1,sigla:o.codigo,name:o.nombre,color:o.color||COLS0[o.codigo]||"#607D8B",cand:o.candidato||CANDS0[o.codigo]||"",logo:o.codigo==="PP"?ICON:(LOGOS0[o.codigo]||"")}});
+  const CED=PARTIES0.map(x=>x[0]);const ordC=o=>{const n=+(o.orden??o.posicion??o.numero_cedula);if(Number.isFinite(n)&&n>0)return n;const k=CED.indexOf(o.codigo);return k<0?999:k+1};
+  const orgsC=[...orgs].sort((a,b)=>ordC(a)-ordC(b)||String(a.codigo).localeCompare(b.codigo)); // orden oficial de la cédula de Sunampe, no alfabético
+  S.parties=orgsC.map((o,i)=>{DB_ORG_BY_CODE[o.codigo]=o;DB_ORG_BY_ID[o.id]=o;return {id:o.codigo,pos:i+1,sigla:o.codigo,name:o.nombre,color:o.color||COLS0[o.codigo]||"#607D8B",cand:o.candidato||CANDS0[o.codigo]||"",logo:o.codigo==="PP"?ICON:(LOGOS0[o.codigo]||"")}});
   HAS_LOC_ELECT=!!(locs&&locs.length&&("electores" in locs[0]));
   const locMap={};S.locales=locs.map((l,i)=>{const x={id:l.id,n:i+1,name:l.nombre,dir:l.direccion||"",mesas:l.mesas_confirmadas||0,elect:l.electores??null};locMap[l.id]=x;return x});
   S.mesas=mesas.map((m)=>{DB_MESA_BY_LOCAL_CODE[m.local_id+"|"+m.numero_mesa]=m;const l=locMap[m.local_id];return {id:m.id,localId:m.local_id,code:m.numero_mesa,elect:m.electores==null?null:m.electores,estado:m.estado}});
@@ -396,10 +402,13 @@ function quick(){
 /* ---------- navigation ---------- */
 const PAGES=[["Operación",null],["panel","Panel general"],["registrar","Registrar acta"],["actas","Actas"],["observadas","Observadas"],["Campo",null],["asistencia","Asistencia de apertura"],["avance","Avance de reportes"],["personeros","Personeros y cuotas"],["Análisis",null],["resultados","Resultados y regidores"],["probabilidad","Escenarios estadísticos"],["conteo","Conteo rápido"],["reportes","Informes de corte"],["Sistema",null],["preparacion","Lista de preparación"],["config","Configuración"],["bitacora","Bitácora"],["auditoria","Auditoría"]];
 let page="panel",editId=null,verifyId=null,filt={};
-function go(p,arg){page=p;if(p==="registrar"){editId=arg||null;verifyId=null}render();window.scrollTo(0,0)}
-function nav(){const nobs=actasArr().filter(a=>a.estado==="Observada").length;$("nav").innerHTML=`<div class="brand"><img src="${ICON}" alt=""><div><b>Sunampe ERM 2026</b><span>Centro de cómputo</span></div></div>`+PAGES.map(([k,t])=>t===null?`<div class="grp">${k}</div>`:`<button class="${page===k?"on":""}" onclick="go('${k}')">${t}${k==="observadas"&&nobs?`<span class="cnt">${nobs}</span>`:""}${k==="preparacion"?(()=>{const it=prepItems();const f=it.filter(x=>x[1]).length;return `<span class="cnt" style="background:${f===it.length?"var(--green)":"#8A6414"}">${f}/${it.length}</span>`})():""}</button>`).join("")+`<div class="bk" style="margin:16px 10px 0;font-size:11px;color:#7F8E9C">Último respaldo:<br>${S.cfg.lastBackup?dt(S.cfg.lastBackup):"ninguno"}<br><a href="#" style="color:#C5D0DB" onclick="(BK.perm&&S.cfg.bkOn?bkWrite('manual').then(()=>render()):exportJSON());return false">Respaldar ahora</a></div>`}
+function go(p,arg){if(esVisor()&&!SOLO_CONSULTA.includes(p)){toast("Tu usuario es solo de consulta.");p="panel"}page=p;if(p==="registrar"){editId=arg||null;verifyId=null}render();window.scrollTo(0,0)}
+const SOLO_CONSULTA=["panel","actas","observadas","avance","resultados","probabilidad","conteo","reportes","auditoria"];
+const esVisor=()=>!!(S&&S.cfg.rol!=="administrador");
+function navPages(){if(!esVisor())return PAGES;const out=[];let grp=null;PAGES.forEach(x=>{if(x[1]===null){grp=x;return}if(!SOLO_CONSULTA.includes(x[0]))return;if(grp){out.push(grp);grp=null}out.push(x)});return out}
+function nav(){document.body.classList.toggle("ro",esVisor());const nobs=actasArr().filter(a=>a.estado==="Observada").length;$("nav").innerHTML=`<div class="brand"><img src="${ICON}" alt=""><div><b>Sunampe ERM 2026</b><span>Centro de cómputo</span></div></div>`+navPages().map(([k,t])=>t===null?`<div class="grp">${k}</div>`:`<button class="${page===k?"on":""}" onclick="go('${k}')">${t}${k==="observadas"&&nobs?`<span class="cnt">${nobs}</span>`:""}${k==="preparacion"?(()=>{const it=prepItems();const f=it.filter(x=>x[1]).length;return `<span class="cnt" style="background:${f===it.length?"var(--green)":"#8A6414"}">${f}/${it.length}</span>`})():""}</button>`).join("")+`<div class="bk" style="margin:16px 10px 0;font-size:11px;color:#7F8E9C">Último respaldo:<br>${S.cfg.lastBackup?dt(S.cfg.lastBackup):"ninguno"}<br><a href="#" style="color:#C5D0DB" onclick="(BK.perm&&S.cfg.bkOn?bkWrite('manual').then(()=>render()):exportJSON());return false">Respaldar ahora</a></div>`}
 function hdr(t,sub){return `<div class="top"><div><h1>${t}</h1><p>${sub||"Distrito de Sunampe, provincia de Chincha, Ica · Elecciones municipales 4 de octubre de 2026"}</p></div></div>`}
-function render(){nav();$("main").innerHTML=topbar()+(V[page]||V.panel)();if(AFTER[page])AFTER[page]();if(innerWidth<=760){const o=document.querySelector("aside button.on");if(o)$("nav").scrollLeft=o.offsetLeft-($("nav").clientWidth-o.offsetWidth)/2}}
+function render(){if(esVisor()&&!SOLO_CONSULTA.includes(page))page="panel";nav();$("main").innerHTML=topbar()+(V[page]||V.panel)();if(AFTER[page])AFTER[page]();if(innerWidth<=760){const o=document.querySelector("aside button.on");if(o)$("nav").scrollLeft=o.offsetLeft-($("nav").clientWidth-o.offsetWidth)/2}}
 const AFTER={};
 const V={};
 
