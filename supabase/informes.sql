@@ -35,9 +35,32 @@ drop policy if exists informes_leer_autorizados on public.informes;
 create policy informes_leer_autorizados on public.informes for select to authenticated
   using (public.puede_leer_informes());
 
--- Para autorizar a un lector (ejecutar aparte, con su correo):
---   insert into public.informe_lectores (usuario) select id from auth.users where email = 'correo@ejemplo.com' on conflict do nothing;
--- Para quitarle el acceso:
---   delete from public.informe_lectores where usuario = (select id from auth.users where email = 'correo@ejemplo.com');
--- Para ver quiénes tienen acceso:
---   select u.email, l.agregado_at from public.informe_lectores l join auth.users u on u.id = l.usuario;
+-- Gestión de lectores desde la app (solo administradores activos)
+create or replace function public.listar_lectores()
+returns table(email text, agregado_at timestamptz) language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.es_administrador() then raise exception 'Solo un administrador puede ver la lista de lectores'; end if;
+  return query select u.email::text, l.agregado_at from public.informe_lectores l join auth.users u on u.id = l.usuario order by u.email;
+end $$;
+
+create or replace function public.agregar_lector(correo text)
+returns text language plpgsql security definer set search_path = public as $$
+declare uid uuid;
+begin
+  if not public.es_administrador() then raise exception 'Solo un administrador puede agregar lectores'; end if;
+  select id into uid from auth.users where lower(email) = lower(trim(correo));
+  if uid is null then raise exception 'No hay ningún usuario de la app con el correo %', trim(correo); end if;
+  insert into public.informe_lectores (usuario) values (uid) on conflict do nothing;
+  return trim(correo);
+end $$;
+
+create or replace function public.quitar_lector(correo text)
+returns text language plpgsql security definer set search_path = public as $$
+begin
+  if not public.es_administrador() then raise exception 'Solo un administrador puede quitar lectores'; end if;
+  delete from public.informe_lectores where usuario in (select id from auth.users where lower(email) = lower(trim(correo)));
+  return trim(correo);
+end $$;
+
+revoke execute on function public.listar_lectores(), public.agregar_lector(text), public.quitar_lector(text) from public, anon;
+grant execute on function public.listar_lectores(), public.agregar_lector(text), public.quitar_lector(text) to authenticated;
