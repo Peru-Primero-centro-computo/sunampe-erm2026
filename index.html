@@ -226,14 +226,16 @@ function esActaVacia(a,votos){return !a.digitacion_1&&!a.archivo_pdf&&!a.archivo
 const SHARED_KEYS=["personeros","resp","muestra","cortes"];
 const SYNC={on:false,sent:{},t:null,busy:false,warned:false};
 async function sbLoadShared(){
-  const {data,error}=await sbClient.from("datos_compartidos").select("clave,valor");
+  const {data,error}=await sbClient.from("datos_compartidos").select("clave,valor,actualizado_at");
   if(error){SYNC.on=false;console.warn("datos_compartidos no disponible:",error.message);return}
-  SYNC.on=true;
+  SYNC.on=true;let got=false;
   (data||[]).forEach(r=>{const k=r.clave;if(!SHARED_KEYS.includes(k))return;
     if(SYNC.sent[k]!==undefined&&JSON.stringify(S[k]??null)!==SYNC.sent[k])return; // cambio local aún no enviado
-    S[k]=r.valor??(k==="muestra"?null:[]);SYNC.sent[k]=JSON.stringify(S[k]??null)});
+    const lt=S.localTs&&S.localTs[k];if(SYNC.sent[k]===undefined&&lt&&lt>(r.actualizado_at?Date.parse(r.actualizado_at):0)&&JSON.stringify(S[k]??null)!==JSON.stringify(r.valor??null))return; // la copia local es más reciente: se enviará
+    S[k]=r.valor??(k==="muestra"?null:[]);SYNC.sent[k]=JSON.stringify(S[k]??null);if(S.localTs)delete S.localTs[k];got=true});
+  if(got&&db)idb("kv","readwrite",s=>s.put(S,"state")).catch(()=>{}); // la copia del equipo queda al día
 }
-function sbQueueSync(){if(!SYNC.on||S.cfg.rol!=="administrador")return;clearTimeout(SYNC.t);SYNC.t=setTimeout(sbSyncShared,800)}
+function sbQueueSync(){if(!SYNC.on||S.cfg.rol!=="administrador")return;S.localTs=S.localTs||{};SHARED_KEYS.forEach(k=>{if(SYNC.sent[k]!==undefined&&JSON.stringify(S[k]??null)!==SYNC.sent[k])S.localTs[k]=Date.now()});clearTimeout(SYNC.t);SYNC.t=setTimeout(sbSyncShared,800)}
 async function sbSyncShared(){
   SYNC.t=null;if(SYNC.busy){sbQueueSync();return}SYNC.busy=true;
   try{
@@ -254,6 +256,7 @@ function keepLocal(prev){
   if(Array.isArray(prev.cortes))S.cortes=prev.cortes;
   if(Array.isArray(prev.log))S.log=prev.log;
   if(prev.onpe)S.onpe=prev.onpe;
+  if(prev.localTs)S.localTs=prev.localTs;
   if(prev.cfg){const c=S.cfg;S.cfg={...c,...prev.cfg,op:c.op,rol:c.rol,authUserId:c.authUserId,electoresConfirmados:c.electoresConfirmados}}
   if(!HAS_LOC_ELECT){const pl={};(prev.locales||[]).forEach(l=>pl[l.id]=l);S.locales.forEach(l=>{if(pl[l.id]&&pl[l.id].elect!=null)l.elect=pl[l.id].elect})}
   Object.values(S.actas).forEach(a=>{const o=prev.actas&&prev.actas[a.mesaId];if(o&&o.dbId===a.dbId)["hist","personero","user","edit"].forEach(k=>{if(o[k]!=null)a[k]=o[k]})});
@@ -478,7 +481,9 @@ async function delActa(id){if(!confirm("¿Anular el acta de la mesa "+mesa(id).c
 /* ---------- observadas ---------- */
 V.observadas=()=>{const rows=S.mesas.filter(m=>S.actas[m.id]&&S.actas[m.id].estado!=="Contabilizada").map(m=>({m,a:S.actas[m.id]}));
  return hdr("Actas observadas y pendientes","No se incluyen en resultados ni en el conteo rápido hasta que se validen.")+`<div class="card"><div class="tw"><table><tr><th>Mesa</th><th>Local</th><th>Estado</th><th>Motivo</th><th class="r">Emitidos</th><th>Hora</th><th>Correcciones</th><th></th></tr>${rows.map(({m,a})=>`<tr><td><b>${h(m.code)}</b></td><td>${h(loc(m.localId).name)}</td><td>${estB(a)}</td><td>${h(a.motivo||"—")}</td><td class="r">${nf(emit(a))} / ${m.elect??"—"}</td><td>${hm(a.hora)}</td><td>${(a.hist||[]).length}</td><td class="row" style="flex-wrap:nowrap"><button class="btn s" onclick="go('registrar','${m.id}')">Revisar</button>${emit(a)<=m.elect?`<button class="btn s" onclick="validar('${m.id}')">Validar</button>`:""}</td></tr>`).join("")||`<tr><td colspan="8" class="muted">No hay actas observadas.</td></tr>`}</table></div></div>`};
-function validar(id){const a=S.actas[id];a.hist=[...(a.hist||[]),{t:Date.now(),u:S.cfg.op,antes:{estado:a.estado,motivo:a.motivo}}];a.estado="Contabilizada";a.motivo="";if(a.verif==="difiere")a.verif="ok";log("Acta validada","Mesa "+mesa(id).code);save();render()}
+async function validar(id){const a=S.actas[id];const antes={estado:a.estado,motivo:a.motivo,verif:a.verif};a.hist=[...(a.hist||[]),{t:Date.now(),u:S.cfg.op,antes:{estado:a.estado,motivo:a.motivo}}];a.estado="Contabilizada";a.motivo="";if(a.verif==="difiere")a.verif="ok";
+ try{await sbSaveActa(a,mesa(id))}catch(e){console.error(e);Object.assign(a,antes);a.hist.pop();toast("No se pudo validar en Supabase: "+(e.message||e));render();return}
+ log("Acta validada","Mesa "+mesa(id).code);save();render()}
 
 /* ---------- avance ---------- */
 function cierreTs(){const [H,M]=S.cfg.cierre.split(":");const d=new Date();d.setHours(+H,+M,0,0);return d.getTime()}
@@ -633,8 +638,10 @@ let WC={k:null,r:null};
 function winAnalysis(sims){
  sims=sims||3000;const ps=P();const C=counted();const key=(S.rev||0)+"|"+C.length+"|"+sims;if(WC.k===key)return WC.r;
  const done=new Set(C.map(a=>a.mesaId));const rem=S.mesas.filter(m=>!done.has(m.id));const T=totals(C);
- const R=rem.reduce((s,m)=>s+m.elect,0);const eC=S.mesas.filter(m=>done.has(m.id)).reduce((s,m)=>s+m.elect,0);
- const ratio=eC?T.v/eC:0;const expV=Math.round(R*ratio);
+ const known=m=>Number.isFinite(m.elect);const allKnown=S.mesas.every(known);
+ const R=rem.reduce((s,m)=>s+(known(m)?m.elect:300),0); // sin electores confirmados: máximo legal por mesa (cota prudente)
+ const eC=S.mesas.filter(m=>done.has(m.id)).reduce((s,m)=>s+(known(m)?m.elect:0),0);
+ const ratio=eC?T.v/eC:0;const expV=allKnown?Math.round(R*ratio):Math.round(rem.length*(C.length?T.v/C.length:0));
  const ord=ps.map((p,i)=>({p,i,v:T.t[p.id]})).sort((a,b)=>b.v-a.v);const lead=ord[0],sec=ord[1];const L=lead.v-sec.v;
  const out={n:C.length,N:S.mesas.length,rem:rem.length,R,expV,L,lead,sec,ord,T,decided:C.length>0&&L>R,rows:[]};
  ord.forEach((o,k)=>{const gap=lead.v-o.v;out.rows.push({...o,max:o.v+R,elim:k>0&&o.v+R<lead.v,gap,need:k>0&&expV?gap/expV:null})});
@@ -642,10 +649,12 @@ function winAnalysis(sims){
  const byLocRem={};locs.forEach(id=>byLocRem[id]=rem.filter(m=>m.localId===id));
  out.cover=locs.filter(id=>pool[id].length).length;
  if(C.length<8||!rem.length){out.mc=null;if(!rem.length&&C.length){out.mc={final:true}}WC={k:key,r:out};return out}
+ // colegios con 1 sola acta: se muestrea del distrito pero ajustado a la proporción de ese colegio (evita sesgo hacia los colegios grandes)
+ const Gt=totals(C),adj={};locs.forEach(id=>{if(pool[id].length!==1)return;const a=pool[id][0],lv=valid(a);adj[id]=ps.map(p=>{const g=Gt.v?Gt.t[p.id]/Gt.v:0,l=lv?(+a.votes[p.id]||0)/lv:0;return g>0?l/g:1})});
  const wins=ps.map(()=>0),keep=[0],share=ps.map(()=>[]);const own=ps.findIndex(p=>p.id===S.cfg.own);const seatD={};let aheadOf2=0;
  for(let s=0;s<sims;s++){const tot=ps.map(p=>T.t[p.id]);
   locs.forEach(id=>{const rm=byLocRem[id];if(!rm.length)return;const base=pool[id].length>=2?pool[id]:C;const n=base.length;const boot=[];for(let i=0;i<n;i++)boot.push(base[Math.floor(Math.random()*n)]);
-   rm.forEach(m=>{const src=boot[Math.floor(Math.random()*n)];const sc=m.elect/mesa(src.mesaId).elect;ps.forEach((p,j)=>tot[j]+=(+src.votes[p.id]||0)*sc)})});
+   rm.forEach(m=>{const src=boot[Math.floor(Math.random()*n)];const se=mesa(src.mesaId).elect;const sc=known(m)&&Number.isFinite(se)&&se>0?m.elect/se:1;const aj=adj[id];ps.forEach((p,j)=>tot[j]+=(+src.votes[p.id]||0)*sc*(aj?aj[j]:1))})});
   let w=0;tot.forEach((x,j)=>{if(x>tot[w])w=j});wins[w]++;if(tot[lead.i]>tot[sec.i])aheadOf2++;const sv=tot.reduce((a,b)=>a+b,0);tot.forEach((x,j)=>share[j].push(x/sv));
   const st=seatsCalc(tot)[own];seatD[st]=(seatD[st]||0)+1}
  const q=(a,f)=>{a.sort((x,y)=>x-y);return a[Math.min(a.length-1,Math.floor(f*a.length))]};
