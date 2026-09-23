@@ -49,7 +49,7 @@ declare uid uuid;
 begin
   if not public.es_administrador() then raise exception 'Solo un administrador puede agregar lectores'; end if;
   select id into uid from auth.users where lower(email) = lower(trim(correo));
-  if uid is null then raise exception 'No hay ningún usuario de la app con el correo %', trim(correo); end if;
+  if uid is null then raise exception 'No hay ningún usuario de la app con ese DNI o correo (%)', trim(correo); end if;
   insert into public.informe_lectores (usuario) values (uid) on conflict do nothing;
   return trim(correo);
 end $$;
