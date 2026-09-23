@@ -390,7 +390,7 @@ function quick(){
 }
 
 /* ---------- navigation ---------- */
-const PAGES=[["Operación",null],["panel","Panel general"],["registrar","Registrar acta"],["actas","Actas"],["observadas","Observadas"],["Campo",null],["asistencia","Asistencia de apertura"],["avance","Avance de reportes"],["personeros","Personeros y cuotas"],["Análisis",null],["resultados","Resultados y regidores"],["probabilidad","Escenarios estadísticos"],["conteo","Conteo rápido"],["reportes","Informes de corte"],["Sistema",null],["preparacion","Lista de preparación"],["config","Configuración"],["bitacora","Bitácora"]];
+const PAGES=[["Operación",null],["panel","Panel general"],["registrar","Registrar acta"],["actas","Actas"],["observadas","Observadas"],["Campo",null],["asistencia","Asistencia de apertura"],["avance","Avance de reportes"],["personeros","Personeros y cuotas"],["Análisis",null],["resultados","Resultados y regidores"],["probabilidad","Escenarios estadísticos"],["conteo","Conteo rápido"],["reportes","Informes de corte"],["Sistema",null],["preparacion","Lista de preparación"],["config","Configuración"],["bitacora","Bitácora"],["auditoria","Auditoría"]];
 let page="panel",editId=null,verifyId=null,filt={};
 function go(p,arg){page=p;if(p==="registrar"){editId=arg||null;verifyId=null}render();window.scrollTo(0,0)}
 function nav(){const nobs=actasArr().filter(a=>a.estado==="Observada").length;$("nav").innerHTML=`<div class="brand"><img src="${ICON}" alt=""><div><b>Sunampe ERM 2026</b><span>Centro de cómputo</span></div></div>`+PAGES.map(([k,t])=>t===null?`<div class="grp">${k}</div>`:`<button class="${page===k?"on":""}" onclick="go('${k}')">${t}${k==="observadas"&&nobs?`<span class="cnt">${nobs}</span>`:""}${k==="preparacion"?(()=>{const it=prepItems();const f=it.filter(x=>x[1]).length;return `<span class="cnt" style="background:${f===it.length?"var(--green)":"#8A6414"}">${f}/${it.length}</span>`})():""}</button>`).join("")+`<div class="bk" style="margin:16px 10px 0;font-size:11px;color:#7F8E9C">Último respaldo:<br>${S.cfg.lastBackup?dt(S.cfg.lastBackup):"ninguno"}<br><a href="#" style="color:#C5D0DB" onclick="(BK.perm&&S.cfg.bkOn?bkWrite('manual').then(()=>render()):exportJSON());return false">Respaldar ahora</a></div>`}
@@ -831,6 +831,14 @@ V.preparacion=()=>{const it=prepItems();const ok=it.filter(x=>x[1]).length;const
  <table>${it.map(([t,o,d,pg])=>`<tr><td style="width:28px"><span class="b ${o?"ok":"pen"}">${o?"✓":"!"}</span></td><td><b>${t}</b><div class="muted">${d}</div></td><td class="r">${o?"":`<button class="btn s" onclick="go('${pg}')">Resolver</button>`}</td></tr>`).join("")}</table></div>`};
 
 /* ---------- bitácora ---------- */
+/* ---------- informe de auditoría (privado: vive en Supabase, solo lectura para lectores autorizados) ---------- */
+V.auditoria=()=>hdr("Auditoría","Informe privado del sistema. Solo lo ven los lectores autorizados; nadie puede modificarlo desde la aplicación.")+`<div class="card" id="audBox"><p class="muted">Cargando informe…</p></div>`;
+AFTER.auditoria=async()=>{const box=$("audBox");if(!box)return;
+ const {data,error}=await sbClient.from("informes").select("titulo,contenido,actualizado_at").eq("clave","auditoria").maybeSingle();
+ if(page!=="auditoria"||!$("audBox"))return;
+ if(error||!data){box.innerHTML=`<p><b>No tienes acceso a este informe</b> o todavía no se ha cargado.</p><p class="muted">Si deberías verlo, pide al administrador que agregue tu correo a la lista de lectores.</p>`;return}
+ box.innerHTML=`<div class="row" style="justify-content:space-between;margin-bottom:8px"><b>${h(data.titulo||"Informe")}</b><span class="muted">Actualizado: ${data.actualizado_at?dt(Date.parse(data.actualizado_at)):"—"}</span></div><iframe id="audFrame" title="Informe de auditoría" sandbox="allow-same-origin allow-popups" style="width:100%;border:0;min-height:70vh;background:#fff;border-radius:6px"></iframe>`;
+ const f=$("audFrame");f.onload=()=>{try{f.style.height=(f.contentDocument.documentElement.scrollHeight+20)+"px"}catch(e){}};f.srcdoc='<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank">'+(data.contenido||"")};
 V.bitacora=()=>hdr("Bitácora","Registro de cada acción realizada en el sistema.")+`<div class="card"><div class="tw"><table><tr><th>Fecha y hora</th><th>Operador</th><th>Acción</th><th>Detalle</th></tr>${S.log.slice(0,400).map(l=>`<tr><td>${dt(l.t)}</td><td>${h(l.u)}</td><td><b>${h(l.a)}</b></td><td class="muted">${h(l.d)}</td></tr>`).join("")||'<tr><td colspan="4" class="muted">Sin registros.</td></tr>'}</table></div></div>`;
 
 /* ---------- respaldo automático en carpeta ---------- */
