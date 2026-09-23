@@ -184,6 +184,7 @@ async function sbLoadState(){
   const {data:perfil,error:pe}=await sbClient.from("perfiles").select("id,nombre,rol,activo").eq("id",user.id).single();
   if(pe) throw new Error("No se pudo cargar el perfil: "+pe.message);
   if(!perfil.activo) throw new Error("Usuario inactivo");
+  let prev=S;if(!prev){try{prev=await idb("kv","readonly",s=>s.get("state"))}catch(e){prev=null}}
   S=fresh();
   S.cfg.op=perfil.nombre||user.email||"Operador";
   S.cfg.rol=perfil.rol;
@@ -198,7 +199,8 @@ async function sbLoadState(){
   if(le||me||oe||ace||ve) throw new Error((le||me||oe||ace||ve).message);
   DB_ORG_BY_CODE={};DB_ORG_BY_ID={};
   S.parties=orgs.map((o,i)=>{DB_ORG_BY_CODE[o.codigo]=o;DB_ORG_BY_ID[o.id]=o;return {id:o.codigo,pos:i+1,sigla:o.codigo,name:o.nombre,color:o.color||COLS0[o.codigo]||"#607D8B",cand:o.candidato||CANDS0[o.codigo]||"",logo:o.codigo==="PP"?ICON:(LOGOS0[o.codigo]||"")}});
-  const locMap={};S.locales=locs.map((l,i)=>{const x={id:l.id,n:i+1,name:l.nombre,dir:l.direccion||"",mesas:l.mesas_confirmadas||0,elect:null};locMap[l.id]=x;return x});
+  HAS_LOC_ELECT=!!(locs&&locs.length&&("electores" in locs[0]));
+  const locMap={};S.locales=locs.map((l,i)=>{const x={id:l.id,n:i+1,name:l.nombre,dir:l.direccion||"",mesas:l.mesas_confirmadas||0,elect:l.electores??null};locMap[l.id]=x;return x});
   S.mesas=mesas.map((m)=>{DB_MESA_BY_LOCAL_CODE[m.local_id+"|"+m.numero_mesa]=m;const l=locMap[m.local_id];return {id:m.id,localId:m.local_id,code:m.numero_mesa,elect:m.electores==null?null:m.electores,estado:m.estado}});
   S.locales.forEach(l=>l.mesas=S.mesas.filter(m=>m.localId===l.id).length);
   S.actas={};
@@ -210,7 +212,46 @@ async function sbLoadState(){
     S.actas[m.id]={mesaId:m.id,votes,bl:a.votos_blancos||0,nu:a.votos_nulos||0,imp:a.votos_impugnados||0,estado:uiEstado,motivo:a.observacion||"",obs:a.observacion||"",personero:"",hora:a.recibido_at||a.created_at||Date.now(),hasPdf:!!a.archivo_pdf,archivoPdfPath:a.archivo_pdf||null,archivoFotoPath:a.archivo_foto||null,verif:a.doble_digitacion_ok?"ok":a.doble_digitacion_requerida?(/Doble digitación no coincide/.test(a.observacion||"")?"difiere":"pendiente"):null,dbId:a.id};
   });
   S.muestra=null;S.cortes=[];S.log=[];S.cfg.rol=perfil.rol;S.cfg.electoresConfirmados=S.mesas.some(m=>Number.isFinite(m.elect));
+  keepLocal(prev);
+  await sbLoadShared();if(perfil.rol==="administrador")sbQueueSync();
   return perfil;
+}
+/* Datos compartidos entre equipos (tabla datos_compartidos; si no existe, quedan solo en este equipo) */
+let HAS_LOC_ELECT=false;
+const SHARED_KEYS=["personeros","resp","muestra","cortes"];
+const SYNC={on:false,sent:{},t:null,busy:false,warned:false};
+async function sbLoadShared(){
+  const {data,error}=await sbClient.from("datos_compartidos").select("clave,valor");
+  if(error){SYNC.on=false;console.warn("datos_compartidos no disponible:",error.message);return}
+  SYNC.on=true;
+  (data||[]).forEach(r=>{const k=r.clave;if(!SHARED_KEYS.includes(k))return;
+    if(SYNC.sent[k]!==undefined&&JSON.stringify(S[k]??null)!==SYNC.sent[k])return; // cambio local aún no enviado
+    S[k]=r.valor??(k==="muestra"?null:[]);SYNC.sent[k]=JSON.stringify(S[k]??null)});
+}
+function sbQueueSync(){if(!SYNC.on||S.cfg.rol!=="administrador")return;clearTimeout(SYNC.t);SYNC.t=setTimeout(sbSyncShared,800)}
+async function sbSyncShared(){
+  SYNC.t=null;if(SYNC.busy){sbQueueSync();return}SYNC.busy=true;
+  try{
+    const rows=SHARED_KEYS.map(k=>[k,JSON.stringify(S[k]??null)]).filter(([k,j])=>j!==SYNC.sent[k])
+      .map(([k,j])=>({clave:k,valor:JSON.parse(j),actualizado_por:AUTH_USER?AUTH_USER.id:null,actualizado_at:new Date().toISOString()}));
+    if(rows.length){const {error}=await sbClient.from("datos_compartidos").upsert(rows,{onConflict:"clave"});if(error)throw error;rows.forEach(r=>SYNC.sent[r.clave]=JSON.stringify(r.valor))}
+    SYNC.warned=false;
+  }catch(e){console.error(e);if(!SYNC.warned){SYNC.warned=true;toast("No se pudo compartir en Supabase: "+(e.message||e))}}
+  finally{SYNC.busy=false}
+}
+/* Datos que solo viven en este equipo (no están en Supabase): se conservan al recargar y en la actualización automática */
+function keepLocal(prev){
+  if(!prev||typeof prev!=="object")return;
+  const ids=new Set(S.mesas.map(m=>m.id));
+  if(Array.isArray(prev.personeros))S.personeros=prev.personeros;
+  if(Array.isArray(prev.resp)&&prev.resp.length)S.resp=prev.resp;
+  if(prev.muestra&&Array.isArray(prev.muestra.mesas)&&prev.muestra.mesas.every(id=>ids.has(id)))S.muestra=prev.muestra;
+  if(Array.isArray(prev.cortes))S.cortes=prev.cortes;
+  if(Array.isArray(prev.log))S.log=prev.log;
+  if(prev.onpe)S.onpe=prev.onpe;
+  if(prev.cfg){const c=S.cfg;S.cfg={...c,...prev.cfg,op:c.op,rol:c.rol,authUserId:c.authUserId,electoresConfirmados:c.electoresConfirmados}}
+  if(!HAS_LOC_ELECT){const pl={};(prev.locales||[]).forEach(l=>pl[l.id]=l);S.locales.forEach(l=>{if(pl[l.id]&&pl[l.id].elect!=null)l.elect=pl[l.id].elect})}
+  Object.values(S.actas).forEach(a=>{const o=prev.actas&&prev.actas[a.mesaId];if(o&&o.dbId===a.dbId)["hist","personero","user","edit"].forEach(k=>{if(o[k]!=null)a[k]=o[k]})});
 }
 async function sbUploadFile(file,mesaId){
   if(!file)return null;
@@ -253,7 +294,7 @@ function fresh(){
 }
 function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DBN,1);r.onupgradeneeded=()=>{r.result.createObjectStore("kv");r.result.createObjectStore("pdf")};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
 function idb(store,mode,fn){return new Promise((res,rej)=>{const t=db.transaction(store,mode);const q=fn(t.objectStore(store));t.oncomplete=()=>res(q&&q.result);t.onerror=()=>rej(t.error)})}
-let saveT;function save(){S.rev=(S.rev||0)+1;if(!BK.quiet)S.chg=(S.chg||0)+1;clearTimeout(saveT);saveT=setTimeout(()=>idb("kv","readwrite",s=>s.put(S,"state")),150)}
+let saveT;function save(){sbQueueSync();S.rev=(S.rev||0)+1;if(!BK.quiet)S.chg=(S.chg||0)+1;clearTimeout(saveT);saveT=setTimeout(()=>idb("kv","readwrite",s=>s.put(S,"state")),150)}
 function log(a,d){S.log.unshift({t:Date.now(),u:S.cfg.op,a,d});if(S.log.length>2000)S.log.length=2000}
 const $=id=>document.getElementById(id);
 const h=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -691,8 +732,13 @@ V.config=()=>`${hdr("Configuración","Datos maestros, responsables, seguridad, s
  ${bkCard()}</div><div class="grid g2" style="margin-top:14px"><div class="card f"><h2>Respaldo manual</h2><p class="muted">Cada corte descarga un respaldo automático. Guárdalo también en una USB. Para fusionar una segunda laptop, importa su respaldo: solo se agregan mesas que no existan aquí.</p><div class="row"><button class="btn p" onclick="exportJSON()">Exportar respaldo completo</button><label class="btn" style="margin:0;color:var(--ink);font-size:13px">Importar y fusionar<input type="file" accept=".json" class="hide" onchange="importJSON(this,false)"></label><label class="btn" style="margin:0;color:var(--ink);font-size:13px">Restaurar completo (incluye PDFs)<input type="file" accept=".json" class="hide" onchange="importJSON(this,true)"></label><button class="btn" onclick="exportCSV()">Exportar actas CSV</button></div><button class="btn d" onclick="wipe()">Borrar todos los datos</button></div></div>`;
 function setP(id,k,v){S.parties.find(p=>p.id===id)[k]=v;save()}
 function setR(id,k,v){S.resp.find(r=>r.id===id)[k]=v;save()}
-function setM(id,k,v){if(k==="code"&&S.mesas.some(m=>m.id!==id&&m.code===v)){toast("Ese número de mesa ya existe");render();return}if(k==="elect"&&(v<0||v>300)){toast("Una mesa tiene entre 0 y 300 electores");render();return}const m=mesa(id);log("Mesa editada",`${m.code} · ${k}: ${m[k]} → ${v}`);m[k]=v;save();render()}
-function setL(id,k,v){const l=loc(id);log("Colegio editado",`${l.name} · ${k}: ${l[k]} → ${v}`);l[k]=v;save();render()}
+async function sbUpdateRow(table,id,patch){const {data,error}=await sbClient.from(table).update(patch).eq("id",id).select("id");if(error)throw error;if(!data||!data.length)throw new Error("Supabase no aceptó el cambio (revisa permisos del usuario)")}
+async function setM(id,k,v){if(k==="code"&&S.mesas.some(m=>m.id!==id&&m.code===v)){toast("Ese número de mesa ya existe");render();return}if(k==="elect"&&(v<0||v>300)){toast("Una mesa tiene entre 0 y 300 electores");render();return}const m=mesa(id);
+ const col={code:"numero_mesa",elect:"electores"}[k];if(col){try{await sbUpdateRow("mesas",id,{[col]:v})}catch(e){console.error(e);toast("No se pudo guardar en Supabase: "+(e.message||e));render();return}}
+ log("Mesa editada",`${m.code} · ${k}: ${m[k]} → ${v}`);m[k]=v;if(k==="elect")S.cfg.electoresConfirmados=S.mesas.some(x=>Number.isFinite(x.elect));save();render()}
+async function setL(id,k,v){const l=loc(id);
+ const col={name:"nombre",dir:"direccion",elect:HAS_LOC_ELECT?"electores":null}[k];if(col){try{await sbUpdateRow("locales",id,{[col]:v})}catch(e){console.error(e);toast("No se pudo guardar en Supabase: "+(e.message||e));render();return}}
+ log("Colegio editado",`${l.name} · ${k}: ${l[k]} → ${v}`);l[k]=v;save();render()}
 function mnum(m){const c=String(m.code);return /^\d+-\d+$/.test(c)?c.split("-")[1]:c}
 function upLogo(id,inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{const img=new Image();img.onload=()=>{const c=document.createElement("canvas");const s=Math.min(1,128/Math.max(img.width,img.height));c.width=img.width*s;c.height=img.height*s;c.getContext("2d").drawImage(img,0,0,c.width,c.height);setP(id,"logo",c.toDataURL("image/png"));render()};img.src=r.result};r.readAsDataURL(f)}
 function startSim(){if(!confirm("Se generarán actas de prueba para las mesas vacías. ¿Continuar?"))return;S.cfg.sim=true;const ps=P();const base=ps.map((p,i)=>Math.max(.02,[.24,.2,.15,.1,.12,.06,.06,.04,.03][i]||.05));S.mesas.forEach(m=>{if(S.actas[m.id])return;if(Math.random()<.35)return;const turn=.7+Math.random()*.15;const em=Math.round(m.elect*turn);const w=base.map(b=>b*(0.6+Math.random()*.8));const sw=w.reduce((a,b)=>a+b,0);const bl=Math.round(em*.06),nu=Math.round(em*.05);const vv=em-bl-nu;const votes={};let acc=0;ps.forEach((p,i)=>{votes[p.id]=i<ps.length-1?Math.round(vv*w[i]/sw):0;acc+=votes[p.id]});votes[ps[ps.length-1].id]=Math.max(0,vv-acc);const obs=Math.random()<.05;S.actas[m.id]={mesaId:m.id,votes,bl,nu,imp:0,estado:obs?"Observada":"Contabilizada",motivo:obs?"Imagen ilegible":"",obs:"",personero:persOf(m.id)?.nombre||"",hora:Date.now()-Math.random()*3*3600000,user:"Simulacro",sim:true,verif:null,hist:[]}});log("Simulacro iniciado","");save();render()}
