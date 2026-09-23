@@ -199,7 +199,8 @@ async function sbLoadState(){
   if(le||me||oe||ace||ve) throw new Error((le||me||oe||ace||ve).message);
   DB_ORG_BY_CODE={};DB_ORG_BY_ID={};
   S.parties=orgs.map((o,i)=>{DB_ORG_BY_CODE[o.codigo]=o;DB_ORG_BY_ID[o.id]=o;return {id:o.codigo,pos:i+1,sigla:o.codigo,name:o.nombre,color:o.color||COLS0[o.codigo]||"#607D8B",cand:o.candidato||CANDS0[o.codigo]||"",logo:o.codigo==="PP"?ICON:(LOGOS0[o.codigo]||"")}});
-  const locMap={};S.locales=locs.map((l,i)=>{const x={id:l.id,n:i+1,name:l.nombre,dir:l.direccion||"",mesas:l.mesas_confirmadas||0,elect:null};locMap[l.id]=x;return x});
+  HAS_LOC_ELECT=!!(locs&&locs.length&&("electores" in locs[0]));
+  const locMap={};S.locales=locs.map((l,i)=>{const x={id:l.id,n:i+1,name:l.nombre,dir:l.direccion||"",mesas:l.mesas_confirmadas||0,elect:l.electores??null};locMap[l.id]=x;return x});
   S.mesas=mesas.map((m)=>{DB_MESA_BY_LOCAL_CODE[m.local_id+"|"+m.numero_mesa]=m;const l=locMap[m.local_id];return {id:m.id,localId:m.local_id,code:m.numero_mesa,elect:m.electores==null?null:m.electores,estado:m.estado}});
   S.locales.forEach(l=>l.mesas=S.mesas.filter(m=>m.localId===l.id).length);
   S.actas={};
@@ -212,7 +213,31 @@ async function sbLoadState(){
   });
   S.muestra=null;S.cortes=[];S.log=[];S.cfg.rol=perfil.rol;S.cfg.electoresConfirmados=S.mesas.some(m=>Number.isFinite(m.elect));
   keepLocal(prev);
+  await sbLoadShared();if(perfil.rol==="administrador")sbQueueSync();
   return perfil;
+}
+/* Datos compartidos entre equipos (tabla datos_compartidos; si no existe, quedan solo en este equipo) */
+let HAS_LOC_ELECT=false;
+const SHARED_KEYS=["personeros","resp","muestra","cortes"];
+const SYNC={on:false,sent:{},t:null,busy:false,warned:false};
+async function sbLoadShared(){
+  const {data,error}=await sbClient.from("datos_compartidos").select("clave,valor");
+  if(error){SYNC.on=false;console.warn("datos_compartidos no disponible:",error.message);return}
+  SYNC.on=true;
+  (data||[]).forEach(r=>{const k=r.clave;if(!SHARED_KEYS.includes(k))return;
+    if(SYNC.sent[k]!==undefined&&JSON.stringify(S[k]??null)!==SYNC.sent[k])return; // cambio local aún no enviado
+    S[k]=r.valor??(k==="muestra"?null:[]);SYNC.sent[k]=JSON.stringify(S[k]??null)});
+}
+function sbQueueSync(){if(!SYNC.on||S.cfg.rol!=="administrador")return;clearTimeout(SYNC.t);SYNC.t=setTimeout(sbSyncShared,800)}
+async function sbSyncShared(){
+  SYNC.t=null;if(SYNC.busy){sbQueueSync();return}SYNC.busy=true;
+  try{
+    const rows=SHARED_KEYS.map(k=>[k,JSON.stringify(S[k]??null)]).filter(([k,j])=>j!==SYNC.sent[k])
+      .map(([k,j])=>({clave:k,valor:JSON.parse(j),actualizado_por:AUTH_USER?AUTH_USER.id:null,actualizado_at:new Date().toISOString()}));
+    if(rows.length){const {error}=await sbClient.from("datos_compartidos").upsert(rows,{onConflict:"clave"});if(error)throw error;rows.forEach(r=>SYNC.sent[r.clave]=JSON.stringify(r.valor))}
+    SYNC.warned=false;
+  }catch(e){console.error(e);if(!SYNC.warned){SYNC.warned=true;toast("No se pudo compartir en Supabase: "+(e.message||e))}}
+  finally{SYNC.busy=false}
 }
 /* Datos que solo viven en este equipo (no están en Supabase): se conservan al recargar y en la actualización automática */
 function keepLocal(prev){
@@ -225,7 +250,7 @@ function keepLocal(prev){
   if(Array.isArray(prev.log))S.log=prev.log;
   if(prev.onpe)S.onpe=prev.onpe;
   if(prev.cfg){const c=S.cfg;S.cfg={...c,...prev.cfg,op:c.op,rol:c.rol,authUserId:c.authUserId,electoresConfirmados:c.electoresConfirmados}}
-  const pl={};(prev.locales||[]).forEach(l=>pl[l.id]=l);S.locales.forEach(l=>{if(pl[l.id]&&pl[l.id].elect!=null)l.elect=pl[l.id].elect});
+  if(!HAS_LOC_ELECT){const pl={};(prev.locales||[]).forEach(l=>pl[l.id]=l);S.locales.forEach(l=>{if(pl[l.id]&&pl[l.id].elect!=null)l.elect=pl[l.id].elect})}
   Object.values(S.actas).forEach(a=>{const o=prev.actas&&prev.actas[a.mesaId];if(o&&o.dbId===a.dbId)["hist","personero","user","edit"].forEach(k=>{if(o[k]!=null)a[k]=o[k]})});
 }
 async function sbUploadFile(file,mesaId){
@@ -269,7 +294,7 @@ function fresh(){
 }
 function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DBN,1);r.onupgradeneeded=()=>{r.result.createObjectStore("kv");r.result.createObjectStore("pdf")};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
 function idb(store,mode,fn){return new Promise((res,rej)=>{const t=db.transaction(store,mode);const q=fn(t.objectStore(store));t.oncomplete=()=>res(q&&q.result);t.onerror=()=>rej(t.error)})}
-let saveT;function save(){S.rev=(S.rev||0)+1;if(!BK.quiet)S.chg=(S.chg||0)+1;clearTimeout(saveT);saveT=setTimeout(()=>idb("kv","readwrite",s=>s.put(S,"state")),150)}
+let saveT;function save(){sbQueueSync();S.rev=(S.rev||0)+1;if(!BK.quiet)S.chg=(S.chg||0)+1;clearTimeout(saveT);saveT=setTimeout(()=>idb("kv","readwrite",s=>s.put(S,"state")),150)}
 function log(a,d){S.log.unshift({t:Date.now(),u:S.cfg.op,a,d});if(S.log.length>2000)S.log.length=2000}
 const $=id=>document.getElementById(id);
 const h=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -712,7 +737,7 @@ async function setM(id,k,v){if(k==="code"&&S.mesas.some(m=>m.id!==id&&m.code===v
  const col={code:"numero_mesa",elect:"electores"}[k];if(col){try{await sbUpdateRow("mesas",id,{[col]:v})}catch(e){console.error(e);toast("No se pudo guardar en Supabase: "+(e.message||e));render();return}}
  log("Mesa editada",`${m.code} · ${k}: ${m[k]} → ${v}`);m[k]=v;if(k==="elect")S.cfg.electoresConfirmados=S.mesas.some(x=>Number.isFinite(x.elect));save();render()}
 async function setL(id,k,v){const l=loc(id);
- const col={name:"nombre",dir:"direccion"}[k];if(col){try{await sbUpdateRow("locales",id,{[col]:v})}catch(e){console.error(e);toast("No se pudo guardar en Supabase: "+(e.message||e));render();return}}
+ const col={name:"nombre",dir:"direccion",elect:HAS_LOC_ELECT?"electores":null}[k];if(col){try{await sbUpdateRow("locales",id,{[col]:v})}catch(e){console.error(e);toast("No se pudo guardar en Supabase: "+(e.message||e));render();return}}
  log("Colegio editado",`${l.name} · ${k}: ${l[k]} → ${v}`);l[k]=v;save();render()}
 function mnum(m){const c=String(m.code);return /^\d+-\d+$/.test(c)?c.split("-")[1]:c}
 function upLogo(id,inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{const img=new Image();img.onload=()=>{const c=document.createElement("canvas");const s=Math.min(1,128/Math.max(img.width,img.height));c.width=img.width*s;c.height=img.height*s;c.getContext("2d").drawImage(img,0,0,c.width,c.height);setP(id,"logo",c.toDataURL("image/png"));render()};img.src=r.result};r.readAsDataURL(f)}
