@@ -207,7 +207,7 @@ async function sbLoadState(){
     const m=S.mesas.find(x=>x.id===a.mesa_id); if(!m)return;
     const votes={};(vBy[a.id]||[]).forEach(v=>{const o=v.organizacion_id&&DB_ORG_BY_ID[v.organizacion_id];if(o)votes[o.codigo]=v.votos||0});
     const uiEstado=(a.estado==="observada")?"Observada":(a.estado==="pendiente"||a.estado==="recibida")?"Pendiente":"Contabilizada";
-    S.actas[m.id]={mesaId:m.id,votes,bl:a.votos_blancos||0,nu:a.votos_nulos||0,imp:a.votos_impugnados||0,estado:uiEstado,motivo:a.observacion||"",obs:a.observacion||"",personero:"",hora:a.recibido_at||a.created_at||Date.now(),hasPdf:!!a.archivo_pdf,archivoPdfPath:a.archivo_pdf||null,archivoFotoPath:a.archivo_foto||null,verif:a.doble_digitacion_ok?"ok":null,dbId:a.id};
+    S.actas[m.id]={mesaId:m.id,votes,bl:a.votos_blancos||0,nu:a.votos_nulos||0,imp:a.votos_impugnados||0,estado:uiEstado,motivo:a.observacion||"",obs:a.observacion||"",personero:"",hora:a.recibido_at||a.created_at||Date.now(),hasPdf:!!a.archivo_pdf,archivoPdfPath:a.archivo_pdf||null,archivoFotoPath:a.archivo_foto||null,verif:a.doble_digitacion_ok?"ok":a.doble_digitacion_requerida?(/Doble digitación no coincide/.test(a.observacion||"")?"difiere":"pendiente"):null,dbId:a.id};
   });
   S.muestra=null;S.cortes=[];S.log=[];S.cfg.rol=perfil.rol;S.cfg.electoresConfirmados=S.mesas.some(m=>Number.isFinite(m.elect));
   return perfil;
@@ -224,14 +224,19 @@ async function sbSaveActa(a,m){
   let path=a.archivoPdfPath||null; const file=$("fPdf")?.files?.[0];
   if(file){path=await sbUploadFile(file,m.id);a.archivoPdfPath=path;a.hasPdf=true}
   const dbEstado=a.estado==="Observada"?"observada":a.estado==="Pendiente"?"pendiente":"digitada";
-  const payload={mesa_id:m.id,estado:dbEstado,total_electores:Number.isFinite(m.elect)?m.elect:null,total_votos:emit(a),votos_blancos:a.bl||0,votos_nulos:a.nu||0,votos_impugnados:a.imp||0,archivo_pdf:path,archivo_foto:a.archivoFotoPath||null,observacion:a.obs||a.motivo||null,digitacion_1:{votes:a.votes,bl:a.bl||0,nu:a.nu||0,imp:a.imp||0},doble_digitacion_requerida:!!inSample(m.id)&&!!S.cfg.doble,doble_digitacion_ok:a.verif==="ok",recibido_at:a.hora?new Date(a.hora).toISOString():new Date().toISOString(),digitado_at:new Date().toISOString(),updated_at:new Date().toISOString()};
+  const payload={mesa_id:m.id,estado:dbEstado,total_electores:Number.isFinite(m.elect)?m.elect:null,total_votos:emit(a),votos_blancos:a.bl||0,votos_nulos:a.nu||0,votos_impugnados:a.imp||0,archivo_pdf:path,archivo_foto:a.archivoFotoPath||null,observacion:a.obs||a.motivo||null,digitacion_1:{votes:a.votes,bl:a.bl||0,nu:a.nu||0,imp:a.imp||0},doble_digitacion_requerida:(!!inSample(m.id)&&!!S.cfg.doble)||!!a.verif,doble_digitacion_ok:a.verif==="ok",recibido_at:a.hora?new Date(a.hora).toISOString():new Date().toISOString(),digitado_at:new Date().toISOString(),updated_at:new Date().toISOString()};
   let row,err;
   if(a.dbId){({data:row,error:err}=await sbClient.from("actas").update(payload).eq("id",a.dbId).select().single())}
   else {({data:row,error:err}=await sbClient.from("actas").insert(payload).select().single())}
   if(err)throw err;a.dbId=row.id;
   const orgs=S.parties.map(p=>({acta_id:row.id,organizacion_id:DB_ORG_BY_CODE[p.id]?.id||null,tipo_voto:"organizacion",votos:Number(a.votes[p.id]||0),digitacion_1:Number(a.votes[p.id]||0)})).filter(x=>x.organizacion_id);
-  await sbClient.from("acta_votos").delete().eq("acta_id",row.id);
-  const {error:ve}=await sbClient.from("acta_votos").insert(orgs);if(ve)throw ve;
+  const {data:prev,error:pe}=await sbClient.from("acta_votos").select("id,organizacion_id").eq("acta_id",row.id);if(pe)throw pe;
+  const byOrg={};(prev||[]).forEach(v=>{if(v.organizacion_id&&!byOrg[v.organizacion_id])byOrg[v.organizacion_id]=v.id});
+  const keep=new Set(),ins=[];
+  for(const o of orgs){const id=byOrg[o.organizacion_id];if(id){keep.add(id);const {error}=await sbClient.from("acta_votos").update(o).eq("id",id);if(error)throw error}else ins.push(o)}
+  if(ins.length){const {error}=await sbClient.from("acta_votos").insert(ins);if(error)throw error}
+  const stale=(prev||[]).map(v=>v.id).filter(id=>!keep.has(id));
+  if(stale.length){const {error}=await sbClient.from("acta_votos").delete().in("id",stale);if(error)throw error}
 }
 async function sbDeleteActa(a){if(a?.dbId){const {error}=await sbClient.from("actas").delete().eq("id",a.dbId);if(error)throw error}}
 function showLogin(msg=""){$("overlay").innerHTML=`<div class="lock"><div class="card f"><img src="${ICON}" style="width:56px;margin:auto"><h2 style="margin:0">Sunampe ERM 2026</h2><p class="muted" style="margin:0">Centro de cómputo · acceso seguro</p><label style="text-align:left">Correo</label><input id="authEmail" type="email" autocomplete="username" placeholder="correo@dominio.com"><label style="text-align:left">Contraseña</label><input id="authPass" type="password" autocomplete="current-password" placeholder="Contraseña" onkeydown="if(event.key==='Enter')loginSupabase()"><div id="authMsg">${msg?`<div class="alert">${h(msg)}</div>`:""}</div><button class="btn p" onclick="loginSupabase()">Ingresar</button></div></div>`;setTimeout(()=>$("authEmail")?.focus(),50)}
@@ -399,13 +404,15 @@ async function saveActa(){const mid=$("fMesa").value;const m=mesa(mid);if(!m){$(
  const f=readForm();const t=emit(f);if(!t){$("fMsg").innerHTML='<div class="alert">Ingresa al menos un voto antes de guardar.</div>';return}
  let est=$("fEst").value,mot=$("fMot").value;if(m.elect!=null&&t>m.elect){est="Observada";mot="Total no coincide"}
  if(est==="Observada"&&!mot)mot="Otro";
- const prev=S.actas[mid];const a={mesaId:mid,...f,estado:est,motivo:est==="Observada"?mot:"",obs:$("fObs").value,personero:$("fPer").value,hora:prev?prev.hora:Date.now(),edit:prev?Date.now():null,user:S.cfg.op,sim:S.cfg.sim,hasPdf:prev?prev.hasPdf:false,verif:inSample(mid)&&S.cfg.doble?(prev&&prev.verif==="ok"&&JSON.stringify(prev.votes)===JSON.stringify(f.votes)?"ok":"pendiente"):null,hist:prev?[...(prev.hist||[]),{t:Date.now(),u:S.cfg.op,antes:{votes:prev.votes,bl:prev.bl,nu:prev.nu,imp:prev.imp,estado:prev.estado}}]:[]};
+ const prev=S.actas[mid];const a={mesaId:mid,...f,estado:est,motivo:est==="Observada"?mot:"",obs:$("fObs").value,personero:$("fPer").value,hora:prev?prev.hora:Date.now(),edit:prev?Date.now():null,user:S.cfg.op,sim:S.cfg.sim,hasPdf:prev?prev.hasPdf:false,dbId:prev?prev.dbId:undefined,archivoPdfPath:prev?prev.archivoPdfPath:null,archivoFotoPath:prev?prev.archivoFotoPath:null,verif:inSample(mid)&&S.cfg.doble?(prev&&prev.verif==="ok"&&JSON.stringify(prev.votes)===JSON.stringify(f.votes)?"ok":"pendiente"):null,hist:prev?[...(prev.hist||[]),{t:Date.now(),u:S.cfg.op,antes:{votes:prev.votes,bl:prev.bl,nu:prev.nu,imp:prev.imp,estado:prev.estado}}]:[]};
  const file=$("fPdf").files[0];if(file){await idb("pdf","readwrite",s=>s.put(file,mid));a.hasPdf=true}
  S.actas[mid]=a;log(prev?"Acta corregida":"Acta registrada",`Mesa ${m.code} · ${est}${prev?" · antes: "+prev.estado:""}`);save();
  try{await sbSaveActa(a,m)}catch(e){console.error(e);$("fMsg").innerHTML=`<div class="alert">No se pudo guardar en Supabase: ${h(e.message||e)}</div>`;return}
  toast(`Mesa ${m.code} guardada · ${est}`+(m.elect!=null&&t>m.elect?" (supera electores hábiles)":""));
  if(a.verif==="pendiente"){verifyId=mid;editId=null;render()}else go("registrar")}
-function saveVerify(){const mid=verifyId;const a=S.actas[mid];const f=readForm();const same=JSON.stringify(f.votes)===JSON.stringify(a.votes)&&f.bl===a.bl&&f.nu===a.nu&&f.imp===a.imp;a.verif=same?"ok":"difiere";if(!same&&a.estado==="Contabilizada"){a.estado="Observada";a.motivo="Doble digitación no coincide"}log("Doble digitación",`Mesa ${mesa(mid).code} · ${same?"coincide":"no coincide"}`);save();toast(same?"Doble digitación correcta":"No coincide: el acta pasó a observadas");verifyId=null;go("registrar")}
+async function saveVerify(){const mid=verifyId;const a=S.actas[mid];const f=readForm();const same=JSON.stringify(f.votes)===JSON.stringify(a.votes)&&f.bl===a.bl&&f.nu===a.nu&&f.imp===a.imp;a.verif=same?"ok":"difiere";if(!same&&a.estado==="Contabilizada"){a.estado="Observada";a.motivo="Doble digitación no coincide"}log("Doble digitación",`Mesa ${mesa(mid).code} · ${same?"coincide":"no coincide"}`);save();
+ try{await sbSaveActa(a,mesa(mid))}catch(e){console.error(e);$("fMsg").innerHTML=`<div class="alert">No se pudo guardar en Supabase: ${h(e.message||e)}</div>`;return}
+ toast(same?"Doble digitación correcta":"No coincide: el acta pasó a observadas");verifyId=null;go("registrar")}
 
 /* ---------- actas ---------- */
 function estB(a){return a?`<span class="b ${a.estado==="Contabilizada"?"ok":a.estado==="Observada"?"obs":"pen"}">${a.estado}</span>`:'<span class="b nd">Sin acta</span>'}
